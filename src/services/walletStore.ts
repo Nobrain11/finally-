@@ -1,5 +1,3 @@
-// src/services/walletStore.ts
-
 import fs from 'fs/promises';
 import path from 'path';
 import { Wallet } from '../types';
@@ -63,7 +61,6 @@ export class WalletStore {
   }
 
   async setActive(id: string) {
-    // Deactivate all
     this.wallets.forEach(w => w.isActive = false);
     const wallet = this.getById(id);
     if (!wallet) throw new Error('Wallet not found');
