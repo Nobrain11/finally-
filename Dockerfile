@@ -2,10 +2,12 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml ./
-RUN npm install -g pnpm && pnpm install --frozen-lockfile
+# Copy package files and install dependencies
+COPY package*.json ./
+RUN npm install
 
+# Copy the rest and build
 COPY . .
-RUN pnpm run build
+RUN npm run build
 
 CMD ["node", "dist/index.js"]
