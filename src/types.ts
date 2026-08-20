@@ -1,31 +1,24 @@
-// src/types.ts
-
-import { ethers } from 'ethers';
-
+// ===================== Enums =====================
 export enum TokenStatus {
   BONDING_CURVE = 'bonding_curve',
   GRADUATED = 'graduated',
 }
-
 export enum OrderType {
   MARKET = 'market',
   LIMIT = 'limit',
   STOP_LOSS = 'stop_loss',
   TAKE_PROFIT = 'take_profit',
 }
-
 export enum OrderStatus {
   PENDING = 'pending',
   FILLED = 'filled',
   CANCELLED = 'cancelled',
   FAILED = 'failed',
 }
-
 export enum TradeSide {
   BUY = 'buy',
   SELL = 'sell',
 }
-
 export enum AlertType {
   MOMENTUM = 'momentum',
   SMART_MONEY = 'smart_money',
@@ -33,7 +26,6 @@ export enum AlertType {
   RISK = 'risk',
   OPPORTUNITY = 'opportunity',
 }
-
 export enum RiskLevel {
   LOW = 'low',
   MEDIUM = 'medium',
@@ -41,11 +33,12 @@ export enum RiskLevel {
   CRITICAL = 'critical',
 }
 
+// ===================== Core Types =====================
 export interface Wallet {
   id: string;
   name?: string;
   address: string;
-  privateKey: string; // encrypted in production
+  privateKey: string;
   mnemonic?: string;
   createdAt: Date;
   isActive: boolean;
@@ -60,7 +53,7 @@ export interface Token {
   status: TokenStatus;
   bondingCurveAddress?: string;
   poolAddress?: string;
-  price: number; // in ETH
+  price: number;
   marketCap?: number;
   liquidity?: number;
   volume24h?: number;
@@ -170,19 +163,6 @@ export interface TradeExecutionResult {
   amountOut?: number;
 }
 
-export interface Config {
-  rpcUrl: string;
-  chainId: number;
-  privateKey: string;
-  telegramToken: string;
-  bondingCurveFactory?: string;
-  uniswapV4Router?: string;
-  defaultSlippage: number;
-  defaultGasLimit: number;
-  maxGasPrice: number;
-}
-
-// For trade simulation
 export interface TradeSimulation {
   priceImpact: number;
   slippage: number;
@@ -190,4 +170,17 @@ export interface TradeSimulation {
   minOut: number;
   gasEstimate: number;
   willSucceed: boolean;
+}
+
+export interface Config {
+  rpcUrl: string;
+  chainId: number;
+  privateKey: string;
+  telegramToken: string;
+  adminChatId: string;
+  defaultSlippage: number;
+  defaultGasLimit: number;
+  maxGasPrice: number;
+  bondingCurveFactory?: string;
+  uniswapV4Router?: string;
 }
