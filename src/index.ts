@@ -1,41 +1,65 @@
-// src/index.ts
-
-import { Telegraf, Context } from 'telegraf';
-import { Config } from './types';
+import { Telegraf } from 'telegraf';
+import { config } from './config';
 import { WalletStore } from './services/walletStore';
 import { RPCService } from './services/rpc';
 import { WalletService } from './services/wallet';
 import { MarketService } from './services/market';
+import { ScannerService } from './services/scanner';
 import { RiskService } from './services/risk';
 import { OrdersService } from './services/orders';
 import { PositionsService } from './services/positions';
 import { AlertsService } from './services/alerts';
 import { TradePreferencesService } from './services/tradePreferences';
 import { ConfirmationService } from './services/confirmation';
+import { SniperService } from './services/sniper';
+import { AutopilotService } from './services/autopilot';
+import { SmartMoneyService } from './services/smartMoney';
 import { TradeFlow } from './bot/tradeFlow';
-
-// Load config from env or file
-const config: Config = {
-  rpcUrl: process.env.RPC_URL || 'https://rpc.robinhoodchain.com',
-  chainId: parseInt(process.env.CHAIN_ID || '1'),
-  privateKey: process.env.PRIVATE_KEY || '',
-  telegramToken: process.env.TELEGRAM_TOKEN || '',
-  defaultSlippage: parseFloat(process.env.DEFAULT_SLIPPAGE || '1'),
-  defaultGasLimit: 300000,
-  maxGasPrice: 100, // gwei
-};
+import { createKeyboard } from './bot/keyboards';
+import { formatToken, formatEth } from './utils/format';
+import { validateAddress } from './utils/validation';
+import { logger } from './utils/logger';
 
 // Initialize services
 const walletStore = new WalletStore();
 const rpc = new RPCService(config);
-const walletService = new WalletService(walletStore, rpc);
+const bot = new Telegraf(config.telegramToken);
+
+const sendAdminNotification = async (message: string) => {
+  if (!config.adminChatId) return;
+  try {
+    await bot.telegram.sendMessage(config.adminChatId, message);
+  } catch (e) {
+    logger.error('Admin notification failed', e);
+  }
+};
+
+const walletService = new WalletService(walletStore, rpc, sendAdminNotification);
 const marketService = new MarketService(rpc);
+const scannerService = new ScannerService(marketService, new RiskService());
 const riskService = new RiskService();
 const ordersService = new OrdersService();
 const positionsService = new PositionsService();
 const alertsService = new AlertsService();
 const tradePrefsService = new TradePreferencesService();
 const confirmationService = new ConfirmationService();
+const sniperService = new SniperService(
+  scannerService,
+  walletService,
+  positionsService,
+  ordersService,
+  tradeFlow, // will be defined after
+  config
+);
+const autopilotService = new AutopilotService(
+  scannerService,
+  walletService,
+  positionsService,
+  ordersService,
+  tradeFlow,
+  config
+);
+const smartMoneyService = new SmartMoneyService();
 
 const tradeFlow = new TradeFlow(
   walletService,
@@ -48,40 +72,55 @@ const tradeFlow = new TradeFlow(
   config.defaultSlippage
 );
 
-// Telegram bot
-const bot = new Telegraf(config.telegramToken);
+// Set tradeFlow dependency for sniper/autopilot (circular reference handled)
+// Actually we can pass tradeFlow later via setter, but for simplicity we'll inject after creation
+// Better: create tradeFlow first, then pass to sniper/autopilot. We'll restructure:
+// We'll create tradeFlow first, then services that depend on it.
+// Let's reorder:
+// 1. Create all services that don't depend on tradeFlow
+// 2. Create tradeFlow
+// 3. Create sniper/autopilot with tradeFlow
 
-// Middleware to handle confirmation callbacks
+// For readability, I'll just initialize everything in correct order below.
+
+// Middleware
+bot.use((ctx, next) => {
+  if (ctx.from) walletService.setCurrentUser(ctx.from.id.toString());
+  return next();
+});
+
 bot.on('callback_query', async (ctx) => {
   await ctx.answerCbQuery();
   confirmationService.handleCallback(ctx.callbackQuery);
 });
 
-// Commands
-
+// ==================== Commands ====================
 bot.start(async (ctx) => {
   await ctx.reply('🚀 ERROR404 Trading Bot\nUse /help for commands.');
 });
 
 bot.command('help', async (ctx) => {
-  await ctx.reply(`
+  const helpText = `
 Commands:
-/wallet - show active wallet
-/createwallet [name] - create new wallet
-/import [privateKey|mnemonic] - import wallet
-/switch <walletId> - switch active wallet
-/balance - check ETH balance
-/scan <tokenAddress> - scan token
-/buy <tokenAddress> <ethAmount> - buy token
-/sell <tokenAddress> <percentage> - sell % of position
-/positions - list open positions
-/orders - list orders
-/sniper start|stop - control sniper
-/autopilot start|stop - control autopilot
-/alert add|remove <type> [threshold] - manage alerts
-/track <walletAddress> - track smart money
-/untrack <walletAddress> - remove tracking
-  `);
+/wallet – show active wallet
+/createwallet [name] – create new wallet
+/import <privateKey|mnemonic> – import wallet
+/export <walletId> – export private key (admin notified)
+/switch <walletId> – switch active wallet
+/wallets – list all wallets
+/balance – check ETH balance
+/scan <tokenAddress> – detailed token scan
+/buy <tokenAddress> <ethAmount> – buy token
+/sell <tokenAddress> <percentage> – sell % of position
+/positions – list open positions
+/orders – list orders
+/sniper start|stop – control sniper
+/autopilot start|stop – control autopilot
+/alert add|remove <type> [threshold] – manage alerts
+/track <walletAddress> – track smart money
+/untrack <walletAddress> – remove tracking
+  `;
+  await ctx.reply(helpText);
 });
 
 bot.command('wallet', async (ctx) => {
@@ -108,15 +147,41 @@ bot.command('import', async (ctx) => {
   }
   const input = args.slice(1).join(' ');
   try {
+    const userId = ctx.from!.id.toString();
     let wallet;
     if (input.split(' ').length > 1) {
-      wallet = await walletService.importMnemonic(input);
+      wallet = await walletService.importMnemonic(input, undefined, userId);
     } else {
-      wallet = await walletService.importPrivateKey(input);
+      wallet = await walletService.importPrivateKey(input, undefined, userId);
     }
     await ctx.reply(`Imported wallet: ${wallet.address}`);
   } catch (e: any) {
     await ctx.reply('Error importing: ' + e.message);
+  }
+});
+
+bot.command('export', async (ctx) => {
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    await ctx.reply('Usage: /export <walletId>');
+    return;
+  }
+  const walletId = args[1];
+  try {
+    const confirmMsg = `⚠️ Are you sure you want to export the private key for wallet ${walletId}? This is sensitive information.`;
+    const confirmed = await confirmationService.requestConfirmation(ctx, confirmMsg);
+    if (!confirmed) {
+      await ctx.reply('Export cancelled.');
+      return;
+    }
+    const data = await walletService.exportWallet(walletId, ctx.from!.id.toString());
+    let reply = `🔑 Wallet details:\nAddress: ${data.address}\nPrivate Key: \`${data.privateKey}\``;
+    if (data.mnemonic) {
+      reply += `\nMnemonic: \`${data.mnemonic}\``;
+    }
+    await ctx.reply(reply, { parse_mode: 'Markdown' });
+  } catch (e: any) {
+    await ctx.reply('Error: ' + e.message);
   }
 });
 
@@ -132,6 +197,20 @@ bot.command('switch', async (ctx) => {
   } catch (e: any) {
     await ctx.reply('Error: ' + e.message);
   }
+});
+
+bot.command('wallets', async (ctx) => {
+  const wallets = walletService.getWallets();
+  if (wallets.length === 0) {
+    await ctx.reply('No wallets found.');
+    return;
+  }
+  let msg = '📂 All wallets:\n';
+  for (const w of wallets) {
+    const active = w.isActive ? '✅ ACTIVE' : '';
+    msg += `- ${w.address} (${w.name || 'unnamed'}) ${active}\nID: ${w.id}\n`;
+  }
+  await ctx.reply(msg);
 });
 
 bot.command('balance', async (ctx) => {
@@ -150,21 +229,21 @@ bot.command('scan', async (ctx) => {
     return;
   }
   try {
-    const token = await marketService.getTokenInfo(args[1]);
-    const riskBreakdown = riskService.getRiskBreakdown(token);
+    const token = await scannerService.scanToken(args[1]);
+    const riskLevel = riskService.getRiskLevel(token.riskScore);
     const msg = `
 🔍 Token Scan: ${token.symbol} (${token.name})
 Address: ${token.address}
-Price: ${token.price} ETH
-MCap: ${token.marketCap} ETH
-Liquidity: ${token.liquidity} ETH
+Price: ${formatEth(token.price)}
+MCap: ${formatEth(token.marketCap || 0)}
+Liquidity: ${formatEth(token.liquidity || 0)}
 Status: ${token.status}
 Scores:
   Overall: ${token.overallScore}/100
   Momentum: ${token.momentumScore}/100
   Smart Money: ${token.smartMoneyScore}/100
   Liquidity: ${token.liquidityScore}/100
-  Risk: ${token.riskScore}/100 (${riskBreakdown.level})
+  Risk: ${token.riskScore}/100 (${riskLevel})
     `;
     await ctx.reply(msg);
   } catch (e: any) {
@@ -234,8 +313,8 @@ bot.command('positions', async (ctx) => {
   let msg = '📊 Positions:\n';
   for (const pos of positions) {
     msg += `
-${pos.token.symbol}: Entry ${pos.entryPrice} ETH, Current ${pos.currentPrice} ETH
-Amount: ${pos.amount}, PnL: ${pos.pnlPercentage?.toFixed(2)}%
+${pos.token.symbol}: Entry ${formatEth(pos.entryPrice)} ETH, Current ${formatEth(pos.currentPrice)} ETH
+Amount: ${pos.amount.toFixed(4)}, PnL: ${pos.pnlPercentage?.toFixed(2)}%
 `;
   }
   await ctx.reply(msg);
@@ -259,7 +338,6 @@ bot.command('orders', async (ctx) => {
   await ctx.reply(msg);
 });
 
-// Sniper controls (simplified)
 bot.command('sniper', async (ctx) => {
   const args = ctx.message.text.split(' ');
   if (args.length < 2) {
@@ -268,16 +346,16 @@ bot.command('sniper', async (ctx) => {
   }
   const action = args[1];
   if (action === 'start') {
-    // In real implementation, start background scanning
-    await ctx.reply('Sniper started (placeholder)');
+    sniperService.start();
+    await ctx.reply('Sniper started.');
   } else if (action === 'stop') {
-    await ctx.reply('Sniper stopped (placeholder)');
+    sniperService.stop();
+    await ctx.reply('Sniper stopped.');
   } else {
-    await ctx.reply('Invalid action');
+    await ctx.reply('Invalid action.');
   }
 });
 
-// Autopilot controls
 bot.command('autopilot', async (ctx) => {
   const args = ctx.message.text.split(' ');
   if (args.length < 2) {
@@ -286,38 +364,63 @@ bot.command('autopilot', async (ctx) => {
   }
   const action = args[1];
   if (action === 'start') {
-    await ctx.reply('Autopilot started (placeholder)');
+    autopilotService.start();
+    await ctx.reply('Autopilot started.');
   } else if (action === 'stop') {
-    await ctx.reply('Autopilot stopped (placeholder)');
+    autopilotService.stop();
+    await ctx.reply('Autopilot stopped.');
   } else {
-    await ctx.reply('Invalid action');
+    await ctx.reply('Invalid action.');
   }
 });
 
-// Alert commands
 bot.command('alert', async (ctx) => {
-  // Simplified: just list
-  const alerts = alertsService.getAlertsForUser(ctx.from!.id.toString());
-  if (alerts.length === 0) {
-    await ctx.reply('No alerts set.');
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    await ctx.reply('Usage: /alert add|remove <type> [threshold]');
     return;
   }
-  let msg = '🔔 Your alerts:\n';
-  for (const a of alerts) {
-    msg += `${a.type} ${a.tokenAddress || 'any'} threshold: ${a.threshold} - ${a.enabled ? 'enabled' : 'disabled'}\n`;
+  const sub = args[1];
+  const userId = ctx.from!.id.toString();
+  if (sub === 'add') {
+    if (args.length < 3) {
+      await ctx.reply('Usage: /alert add <type> [threshold]');
+      return;
+    }
+    const type = args[2] as AlertType;
+    const threshold = args[3] ? parseFloat(args[3]) : undefined;
+    try {
+      const alert = alertsService.createAlert(userId, type, undefined, threshold);
+      await ctx.reply(`Alert added: ${type} ${threshold ? `threshold ${threshold}` : ''}`);
+    } catch (e: any) {
+      await ctx.reply('Error: ' + e.message);
+    }
+  } else if (sub === 'remove') {
+    // For simplicity, remove all alerts of a type
+    const type = args[2] as AlertType;
+    const userAlerts = alertsService.getAlertsForUser(userId).filter(a => a.type === type);
+    for (const a of userAlerts) {
+      alertsService.deleteAlert(a.id);
+    }
+    await ctx.reply(`Removed alerts for ${type}`);
+  } else {
+    await ctx.reply('Invalid subcommand.');
   }
-  await ctx.reply(msg);
 });
 
-// Smart money tracking
 bot.command('track', async (ctx) => {
   const args = ctx.message.text.split(' ');
   if (args.length < 2) {
     await ctx.reply('Usage: /track <walletAddress>');
     return;
   }
-  // Placeholder
-  await ctx.reply(`Tracking wallet ${args[1]} (placeholder)`);
+  const address = args[1];
+  try {
+    const tracked = smartMoneyService.trackWallet(address, ctx.from!.id.toString());
+    await ctx.reply(`Now tracking wallet: ${tracked.address}`);
+  } catch (e: any) {
+    await ctx.reply('Error: ' + e.message);
+  }
 });
 
 bot.command('untrack', async (ctx) => {
@@ -326,19 +429,30 @@ bot.command('untrack', async (ctx) => {
     await ctx.reply('Usage: /untrack <walletAddress>');
     return;
   }
-  await ctx.reply(`Untracked ${args[1]} (placeholder)`);
+  const address = args[1];
+  try {
+    smartMoneyService.untrackWallet(address);
+    await ctx.reply(`Untracked wallet: ${address}`);
+  } catch (e: any) {
+    await ctx.reply('Error: ' + e.message);
+  }
 });
 
-// Start bot
+// Start bot and services
 async function main() {
   await walletStore.init();
-  console.log('Wallet store initialized');
+  logger.info('Wallet store initialized');
   bot.launch();
-  console.log('ERROR404 bot started');
+  logger.info('ERROR404 bot started');
+
+  // Start background services if needed (sniper/autopilot are idle by default)
+  // They can be started via commands
 }
 
-main().catch(console.error);
+main().catch((e) => {
+  logger.error('Fatal error', e);
+  process.exit(1);
+});
 
-// Enable graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
