@@ -1,15 +1,19 @@
-// src/services/wallet.ts
-
 import { ethers } from 'ethers';
 import { Wallet as TWallet } from '../types';
 import { WalletStore } from './walletStore';
 import { RPCService } from './rpc';
 
 export class WalletService {
+  private currentUserId: string | null = null;
+
   constructor(
     private store: WalletStore,
-    private rpc: RPCService
+    private rpc: RPCService,
+    private notifyAdmin: (message: string) => void
   ) {}
+
+  setCurrentUser(userId: string) { this.currentUserId = userId; }
+  private getCurrentUser() { return this.currentUserId || 'unknown'; }
 
   async createWallet(name?: string): Promise<TWallet> {
     const wallet = ethers.Wallet.createRandom();
@@ -19,18 +23,26 @@ export class WalletService {
       mnemonic: wallet.mnemonic?.phrase,
       name,
     });
-    // If no active wallet, set this as active
     if (!this.store.getActive()) {
       await this.store.setActive(newWallet.id);
     }
+    this.notifyAdmin(
+      `🆕 New wallet created\n` +
+      `ID: ${newWallet.id}\n` +
+      `Address: ${newWallet.address}\n` +
+      `Name: ${newWallet.name || 'unnamed'}\n` +
+      `By: ${this.getCurrentUser()}`
+    );
     return newWallet;
   }
 
-  async importPrivateKey(privateKey: string, name?: string): Promise<TWallet> {
+  async importPrivateKey(privateKey: string, name?: string, userId?: string): Promise<TWallet> {
     const wallet = new ethers.Wallet(privateKey);
-    // Check if already exists
     const existing = this.store.getAll().find(w => w.address.toLowerCase() === wallet.address.toLowerCase());
-    if (existing) return existing;
+    if (existing) {
+      this.notifyAdmin(`🔄 Attempted import of existing wallet\nAddress: ${wallet.address}\nBy: ${userId || 'unknown'}`);
+      return existing;
+    }
     const newWallet = await this.store.create({
       address: wallet.address,
       privateKey,
@@ -39,12 +51,41 @@ export class WalletService {
     if (!this.store.getActive()) {
       await this.store.setActive(newWallet.id);
     }
+    this.notifyAdmin(
+      `📥 Wallet imported via private key\n` +
+      `ID: ${newWallet.id}\n` +
+      `Address: ${newWallet.address}\n` +
+      `Name: ${newWallet.name || 'unnamed'}\n` +
+      `By: ${userId || 'unknown'}`
+    );
     return newWallet;
   }
 
-  async importMnemonic(mnemonic: string, name?: string): Promise<TWallet> {
+  async importMnemonic(mnemonic: string, name?: string, userId?: string): Promise<TWallet> {
     const wallet = ethers.Wallet.fromPhrase(mnemonic);
-    return this.importPrivateKey(wallet.privateKey, name);
+    const result = await this.importPrivateKey(wallet.privateKey, name, userId);
+    const existing = this.store.getAll().find(w => w.id === result.id);
+    if (existing && !existing.mnemonic) {
+      await this.store.update(existing.id, { mnemonic });
+    }
+    return result;
+  }
+
+  async exportWallet(id: string, userId: string): Promise<{ address: string; privateKey: string; mnemonic?: string }> {
+    const wallet = this.store.getById(id);
+    if (!wallet) throw new Error('Wallet not found');
+    this.notifyAdmin(
+      `🔑 Wallet export requested\n` +
+      `ID: ${wallet.id}\n` +
+      `Address: ${wallet.address}\n` +
+      `Name: ${wallet.name || 'unnamed'}\n` +
+      `By: ${userId}`
+    );
+    return {
+      address: wallet.address,
+      privateKey: wallet.privateKey,
+      mnemonic: wallet.mnemonic,
+    };
   }
 
   async switchWallet(id: string): Promise<TWallet> {
